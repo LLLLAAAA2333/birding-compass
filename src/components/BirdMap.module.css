@@ -1,0 +1,20 @@
+.map {
+  position: absolute;
+  inset: 0;
+  background: #dce7dd;
+  z-index: 0;
+}
+
+.map :global(.leaflet-container) {
+  font-family: "Source Sans 3", "PingFang SC", sans-serif;
+}
+
+.map :global(.leaflet-control-attribution) {
+  font-size: 10px;
+  background: rgba(253, 250, 239, 0.88);
+}
+
+.map :global(.leaflet-control-zoom a) {
+  color: #254737;
+  background: #fffdf5;
+}
