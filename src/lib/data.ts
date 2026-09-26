@@ -1,68 +1,203 @@
-import { isTauri } from "@tauri-apps/api/core";
-import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
-import { buildRecentUrl, normalizeObservations, type Observation } from "./ebird";
+export type Area = {
+  id: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+};
+export type Hotspot = {
+  id: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+  allTimeSpeciesCount: number;
+  latestAt: string | null;
+  provinceCode: string | null;
+  cityCode: string | null;
+  province: string | null;
+  city: string | null;
+};
 
-export type City = { id: "hefei" | "nanjing"; name: string; latitude: number; longitude: number };
+const REGION_CACHE_KEY = "bird:regions:CN:v1";
+type RegionNames = Record<string, string>;
 
-export const CITIES: City[] = [
-  { id: "hefei", name: "合肥", latitude: 31.8206, longitude: 117.2272 },
-  { id: "nanjing", name: "南京", latitude: 32.0603, longitude: 118.7969 },
-];
-
-export type Snapshot = { observations: Observation[]; fetchedAt: string };
-
-function cacheKey(city: City, days: number, radiusKm: number): string {
-  return `bird:recent:v2:${city.id}:${city.latitude}:${city.longitude}:${days}:${radiusKm}`;
-}
-
-export function readSnapshot(city: City, days: number, radiusKm: number): Snapshot | null {
+export function readRegionNames(): RegionNames {
   try {
-    const raw = localStorage.getItem(cacheKey(city, days, radiusKm));
-    if (!raw) return null;
-    const saved: unknown = JSON.parse(raw);
-    if (!saved || typeof saved !== "object" || !("payload" in saved) || !("fetchedAt" in saved)) return null;
-    if (typeof saved.fetchedAt !== "string" || Number.isNaN(Date.parse(saved.fetchedAt))) return null;
-    return { observations: normalizeObservations(saved.payload), fetchedAt: saved.fetchedAt };
+    const value: unknown = JSON.parse(
+      localStorage.getItem(REGION_CACHE_KEY) ?? "{}",
+    );
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return Object.fromEntries(
+      Object.entries(value).filter(
+        ([code, name]) =>
+          /^CN-[A-Z0-9-]+$/.test(code) &&
+          typeof name === "string" &&
+          name.length < 100,
+      ),
+    );
   } catch {
-    return null;
+    return {};
   }
 }
 
-export async function fetchRecent(city: City, days: number, radiusKm: number, apiKey: string, signal?: AbortSignal): Promise<Snapshot> {
-  if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
-  const url = buildRecentUrl(city.latitude, city.longitude, days, radiusKm);
-  const requestUrl = isTauri() ? url : url.replace("https://api.ebird.org", "/api/ebird");
-  const request = isTauri() ? tauriFetch : globalThis.fetch;
-  const controller = new AbortController();
-  const onAbort = () => controller.abort();
-  signal?.addEventListener("abort", onAbort, { once: true });
-  const timeout = setTimeout(() => controller.abort(), 15000);
-  let payload: unknown;
-  try {
-    const response = await request(requestUrl, {
-      headers: { "X-eBirdApiToken": apiKey },
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      if (response.status === 401 || response.status === 403) throw new Error("API Key 无效或尚未获得权限");
-      if (response.status === 429) throw new Error("eBird 请求过于频繁，请稍后再试");
-      throw new Error(`eBird 请求失败（${response.status}）`);
+function nameFor(code: string | null, names: RegionNames): string | null {
+  return code ? (names[code] ?? null) : null;
+}
+
+export function withRegionNames(
+  hotspots: Hotspot[],
+  names: RegionNames,
+): Hotspot[] {
+  return hotspots.map((hotspot) => ({
+    ...hotspot,
+    province: nameFor(hotspot.provinceCode, names) ?? hotspot.province,
+    city: nameFor(hotspot.cityCode, names) ?? hotspot.city,
+  }));
+}
+
+export async function fetchRegionNames(
+  hotspots: Hotspot[],
+  request: (url: string, signal: AbortSignal) => Promise<unknown>,
+  signal?: AbortSignal,
+  onNames?: (names: RegionNames) => void,
+): Promise<RegionNames> {
+  const names = readRegionNames();
+  const missing = new Set(
+    hotspots
+      .flatMap(({ provinceCode, cityCode }) => [provinceCode, cityCode])
+      .filter((code): code is string => Boolean(code && !names[code])),
+  );
+  if (missing.size === 0) return names;
+  const provinceCodes = [
+    ...new Set(
+      [...missing].map((code) => code.split("-").slice(0, 2).join("-")),
+    ),
+  ];
+  const paths = [
+    ...([...missing].some((code) => code.split("-").length === 2)
+      ? ["/v2/ref/region/list/subnational1/CN"]
+      : []),
+    ...provinceCodes.map(
+      (code) => `/v2/ref/region/list/subnational2/${encodeURIComponent(code)}`,
+    ),
+  ];
+  for (let offset = 0; offset < paths.length; offset += 3) {
+    if (signal?.aborted)
+      throw new DOMException("Request cancelled", "AbortError");
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    let results: PromiseSettledResult<unknown[]>[];
+    try {
+      results = await Promise.allSettled(
+        paths.slice(offset, offset + 3).map(async (path) => {
+          const payload = await request(
+            `https://api.ebird.org${path}`,
+            controller.signal,
+          );
+          if (!Array.isArray(payload))
+            throw new Error("eBird 地区名称格式无法识别");
+          return payload;
+        }),
+      );
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
     }
-    payload = await response.json();
-    if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
-  } catch (error) {
-    if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
-    if (controller.signal.aborted) throw new Error("连接 eBird 超时，请检查网络后重试");
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-    signal?.removeEventListener("abort", onAbort);
+    const limited = results.find(
+      (result) => result.status === "rejected" && result.reason?.status === 429,
+    );
+    if (limited?.status === "rejected") throw limited.reason;
+    for (const result of results) {
+      if (result.status !== "fulfilled") continue;
+      for (const item of result.value) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+        const row = item as Record<string, unknown>;
+        if (
+          typeof row.code === "string" &&
+          /^CN-[A-Z0-9-]+$/.test(row.code) &&
+          typeof row.name === "string" &&
+          row.name.trim()
+        )
+          names[row.code] = row.name.trim();
+      }
+    }
+    if (signal?.aborted)
+      throw new DOMException("Request cancelled", "AbortError");
+    try {
+      localStorage.setItem(REGION_CACHE_KEY, JSON.stringify(names));
+    } catch {
+      /* Keep live names. */
+    }
+    onNames?.(names);
   }
-  const snapshot = { observations: normalizeObservations(payload), fetchedAt: new Date().toISOString() };
-  try {
-    localStorage.setItem(cacheKey(city, days, radiusKm), JSON.stringify({ payload, fetchedAt: snapshot.fetchedAt }));
-  } catch {
-    // Storage may be unavailable or full; current data remains usable.
+  if (signal?.aborted)
+    throw new DOMException("Request cancelled", "AbortError");
+  return names;
+}
+
+export function normalizeHotspots(payload: unknown): Hotspot[] {
+  if (!Array.isArray(payload))
+    throw new Error("eBird 热门鸟点数据格式无法识别");
+  const hotspots: Hotspot[] = [];
+  for (const item of payload) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const row = item as Record<string, unknown>;
+    if (typeof row.locId !== "string" || !/^L\d+$/.test(row.locId)) continue;
+    if (typeof row.locName !== "string" || !row.locName.trim()) continue;
+    if (
+      typeof row.lat !== "number" ||
+      !Number.isFinite(row.lat) ||
+      row.lat < -90 ||
+      row.lat > 90
+    )
+      continue;
+    if (
+      typeof row.lng !== "number" ||
+      !Number.isFinite(row.lng) ||
+      row.lng < -180 ||
+      row.lng > 180
+    )
+      continue;
+    if (
+      typeof row.numSpeciesAllTime !== "number" ||
+      !Number.isInteger(row.numSpeciesAllTime) ||
+      row.numSpeciesAllTime < 0
+    )
+      continue;
+    hotspots.push({
+      id: row.locId,
+      name: row.locName.trim(),
+      latitude: row.lat,
+      longitude: row.lng,
+      allTimeSpeciesCount: row.numSpeciesAllTime,
+      latestAt:
+        typeof row.latestObsDt === "string" && row.latestObsDt.trim()
+          ? row.latestObsDt
+          : null,
+      provinceCode:
+        typeof row.subnational1Code === "string" &&
+        /^CN-[A-Z0-9]+$/.test(row.subnational1Code)
+          ? row.subnational1Code
+          : null,
+      cityCode:
+        typeof row.subnational2Code === "string" &&
+        /^CN-[A-Z0-9-]+$/.test(row.subnational2Code)
+          ? row.subnational2Code
+          : null,
+      province:
+        typeof row.province === "string" && row.province.trim()
+          ? row.province.trim()
+          : null,
+      city:
+        typeof row.city === "string" && row.city.trim()
+          ? row.city.trim()
+          : null,
+    });
   }
-  return snapshot;
+  return hotspots.sort(
+    (a, b) =>
+      (b.latestAt ?? "").localeCompare(a.latestAt ?? "") ||
+      a.name.localeCompare(b.name),
+  );
 }

@@ -17,10 +17,21 @@ export default defineConfig(() => ({
     port: 1420,
     strictPort: true,
     proxy: {
+      "/api/birdreport": {
+        target: "https://api.birdreport.cn",
+        changeOrigin: true,
+        headers: { Origin: "https://www.birdreport.cn", Referer: "https://www.birdreport.cn/" },
+        rewrite: (path) => path.replace(/^\/api\/birdreport/, ""),
+      },
       "/api/ebird": {
         target: "https://api.ebird.org",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/ebird/, ""),
+      },
+      "/api/geocode": {
+        target: "https://geocoding-api.open-meteo.com",
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/geocode/, ""),
       },
     },
     host: host || false,

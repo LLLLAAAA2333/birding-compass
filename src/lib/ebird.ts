@@ -9,6 +9,7 @@ export type Observation = {
   latitude: number;
   longitude: number;
   checklistUrl: string | null;
+  isHotspot: boolean;
 };
 
 export type BirdPlace = {
@@ -74,6 +75,7 @@ export function normalizeObservations(payload: unknown): Observation[] {
       count: typeof entry.howMany === "number" && Number.isFinite(entry.howMany) ? entry.howMany : null,
       latitude,
       longitude,
+      isHotspot: entry.locationPrivate === false,
       checklistUrl: submissionId && /^S\d+$/.test(submissionId) ? `https://ebird.org/checklist/${submissionId}` : null,
     });
   }

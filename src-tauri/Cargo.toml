@@ -1,7 +1,7 @@
 [package]
 name = "bird"
 version = "0.1.0"
-description = "Personal birdwatching field notes for Hefei and Nanjing"
+description = "Personal birdwatching map and regional field notes"
 authors = ["Personal project"]
 edition = "2021"
 
@@ -20,7 +20,15 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
-tauri-plugin-http = "=2.6.1"
+# Preserve the Origin/Referer required by the record center's public web API.
+# Network destinations remain restricted by capabilities/default.json.
+tauri-plugin-http = { version = "=2.6.1", features = ["unsafe-headers"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "=3.6.3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "=3.6.3", features = ["windows-native"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
